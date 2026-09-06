@@ -1,6 +1,6 @@
 # Mac Studio (M3 Ultra / 512GB) 設計書
 
-- 版: v0.3（設計中。決定事項は「決定」、未決は「未決」と明記する）
+- 版: v0.4（設計中。決定事項は「決定」、未決は「未決」と明記する）
 - 最終更新: 2026-09-06
 
 ## 1. 目的と原則
@@ -132,8 +132,11 @@
 ### 5.6 LLM ランタイム（フェーズ 3）
 
 - 役割: まずは「試してみる」。MacBook Air との差を体感する。
-- 導入候補: LM Studio（GUI、手軽）、Ollama（CLI）、MLX（Apple 純正の推論基盤、最速）。
+- ランタイム: **MLX（mlx-lm）を直接使う（決定）**。Apple 純正の推論基盤で最速。CLI で完結し、`mlx_lm.chat`（対話）、`mlx_lm.generate`（単発）、`mlx_lm.server`（OpenAI 互換 API）が揃っている。
+- Python 環境: Homebrew の `uv` で専用の仮想環境を作り、システムの Python を汚さない。管理者ユーザーの領域に置く（ノード系のサービスユーザーとは分ける）。
+- モデル置き場: `/opt/stack/models`（Hugging Face のキャッシュ先を環境変数 `HF_HOME` でここに向ける）。MLX 形式に変換済みのモデルは `mlx-community` から取得する。
 - 最初に試すモデル（案）: 中型（70B〜235B 級）で速度を確認 → 最大級（DeepSeek V3/R1 級、4bit で約 400GB）を試す。
+- GPU メモリ上限: `sudo sysctl iogpu.wired_limit_mb=458752`（448GB）。再起動で戻るため、LLM を使うときだけ設定する手順にするか、launchd で起動時に設定するかは未決。
 - MacBook から使う場合は OpenAI 互換 API を LAN 内にのみ公開する（外出先からは使わない前提。必要になれば hidden service 化を検討）。
 
 ## 6. セキュリティ方針（案）
@@ -142,6 +145,23 @@
 - **FileVault 有効（決定）**。盗難・持ち出し時のデータ保護を優先する。代償として、停電や再起動のたびに物理的にパスワード入力が必要（LaunchDaemon もロック解除後にしか起動しない）。UPS の導入と、計画停止時の `fdesetup authrestart`（次回 1 回だけパスワード不要で再起動）で運用負担を抑える。
 - RPC・Fulcrum・LLM API はすべて LAN または Tor のみに公開。グローバル IP に直接ポートを開けない。
 - SSH は公開鍵認証のみ。パスワード認証は無効化する。
+- **ユーザー分離（決定）**: 管理者ユーザー 1 名（SSH ログイン用、LLM 実験用）に加え、ノード系サービス専用の非管理者ユーザーを作る。
+  - サービスユーザー名（案）: `_btcnode`（macOS のシステムユーザー慣習に倣い先頭にアンダースコア。ログインシェル無し、ホームディレクトリはデータ置き場）。
+  - bitcoind・Fulcrum・Tor はすべてこのユーザーで LaunchDaemon として起動する（`UserName` キーで指定）。FileVault のロック解除後、誰もログインしなくても起動する。
+  - 監視スクリプトも同ユーザーで動かす。Telegram の Bot トークンはこのユーザーのみ読める（`chmod 600`）ファイルに置く。
+
+### 6.1 ディレクトリ配置（案）
+
+```
+/opt/stack/                 ... ルート（所有者: _btcnode、管理者は読み取りのみ）
+  bin/                      ... bitcoind, bitcoin-cli, Fulcrum などの実行ファイル
+  bitcoin/                  ... bitcoin.conf, blocks/, chainstate/, indexes/
+  fulcrum/                  ... fulcrum.conf, db/, 証明書
+  tor/                      ... torrc, hidden service ディレクトリ（鍵はここ）
+  monitor/                  ... 監視スクリプト、secrets/（Bot トークン）
+  models/                   ... LLM モデル（所有者は管理者ユーザー。LLM はノードと分離）
+/Library/LaunchDaemons/     ... com.local.bitcoind.plist など
+```
 - ウォレットの秘密鍵は Mac Studio に置かない。署名は MacBook（既存 Electrum）で行う。
 - 将来的にハードウェアウォレット導入を検討する余地を残す（保留）。
 
@@ -149,7 +169,11 @@
 
 - UPS を導入する（決定）。停電時に bitcoind と Fulcrum を安全停止させてから電源を落とす。chainstate や Fulcrum の DB が壊れると再同期で数日を失う。macOS は USB 接続の UPS を標準で認識し、「システム設定 > バッテリー」でシャットダウン条件を設定できる。
 - 停電復帰後は FileVault のため自動起動しない。物理的にパスワードを入れて復帰させる（設計上の割り切り）。
-- バックアップ対象: 設定ファイル群、Tor hidden service 鍵、launchd 定義。チェーンデータはバックアップしない（再同期可能）。
+- バックアップ（決定: 暗号化した外付け SSD / USB メモリ）:
+  - 対象: `/opt/stack/{bitcoin/bitcoin.conf, fulcrum/fulcrum.conf, fulcrum/証明書, tor/torrc, tor/hidden service ディレクトリ, monitor/}` と `/Library/LaunchDaemons/com.local.*.plist`。合計で数 MB。
+  - 対象外: チェーンデータ、Fulcrum の DB、LLM モデル（すべて再取得・再構築可能）。
+  - 方法: APFS 暗号化でフォーマットした USB メモリに `tar` で固めてコピー。設定を変えたときに手動で更新する。ディスクは普段は抜いて保管する。
+  - 設定ファイルの「内容」はこの Git リポジトリにも残す（鍵・トークン・RPC パスワードは除外し、`.gitignore` で防ぐ）。
 - 監視（決定: シェルスクリプト＋launchd の最小構成）:
   - launchd の定期実行（例: 10 分ごと）で以下を確認する。
     - bitcoind の生存と RPC 応答、ブロック高が外部と比べて遅れていないか（比較先は Tor 経由で取得するか、単純に「直近 N 時間ブロック高が進んでいない」で判定する）
@@ -158,7 +182,7 @@
     - ディスク残量（閾値: 残り 500GB を切ったら警告）
     - UPS の状態（`pmset -g batt` で商用電源かバッテリー駆動か）
   - 異常時のみ通知し、正常時は沈黙する。復旧時に「復旧」を 1 回だけ送る。
-- 通知先（決定: チャット。Telegram / Discord のどちらにするかは未決）:
+- 通知先（決定: Telegram Bot API）:
   - 通知本文には**アドレス・残高・txid など資産に紐づく情報を一切含めない**。「bitcoind 停止」「ブロック高停滞」「ディスク残量」程度の汎用文言に限定する。
   - 通知の送信は Tor 経由（`curl --socks5-hostname 127.0.0.1:9050`）にし、通知サービス側に自宅 IP を渡さない。
   - Bot トークンは設定ファイルに平文で置かず、macOS キーチェーンまたは権限を絞ったファイルに置く。
@@ -184,11 +208,14 @@
 | Q4 | Bitcoin Core / Fulcrum の導入経路 | Homebrew / 公式バイナリ / ソースビルド | **決定: 公式バイナリ＋署名検証（Tor のみ Homebrew）** |
 | Q5 | txindex | 有効 / 無効 | **決定: 有効** |
 | Q6 | 監視方法 | シェル＋launchd / 既製ツール | **決定: シェル＋launchd、通知はチャット（Tor 経由）** |
-| Q6b | 通知チャット | Telegram / Discord | 未決 |
+| Q6b | 通知チャット | Telegram / Discord | **決定: Telegram** |
 | Q7 | UPS | 導入する / しない | **決定: 導入する** |
-| Q8 | LLM ランタイム | LM Studio / Ollama / MLX | 未決 |
+| Q8 | LLM ランタイム | LM Studio / Ollama / MLX | **決定: MLX（mlx-lm）** |
 | Q9 | mempool.space をネイティブ導入する価値 | 導入する / 見送る | 未決（フェーズ 2 着手時に判断） |
 | Q10 | ネットワーク | 固定 IP の割り当て方、LAN 内ホスト名、Wi‑Fi か有線か | **決定: 有線 10GbE、DHCP 予約で固定 IP** |
-| Q11 | ログイン・ユーザー構成 | 管理者 1 ユーザー / サービス専用ユーザーを分ける | 未決 |
-| Q12 | 設定・鍵のバックアップ先 | 外付け SSD / MacBook / 紙（Tor 鍵は小さい） | 未決 |
+| Q11 | ログイン・ユーザー構成 | 管理者 1 ユーザー / サービス専用ユーザーを分ける | **決定: 管理者＋サービス専用ユーザー `_btcnode`** |
+| Q12 | 設定・鍵のバックアップ先 | 外付け SSD / MacBook / 紙（Tor 鍵は小さい） | **決定: 暗号化した外付け SSD / USB メモリ** |
 | Q13 | Fulcrum の SSL 証明書 | 自己署名（Electrum 側で固定して信頼） / 使わず Tor のみ | 未決 |
+| Q14 | bitcoind の P2P 経路 | Tor のみ（onlynet=onion） / Tor＋クリアネット | 未決 |
+| Q15 | MacBook 側の Tor クライアント | Homebrew の tor 常駐 / Tor Browser 起動時のみ | 未決 |
+| Q16 | GPU メモリ上限の設定タイミング | 起動時に固定 / LLM 使用時だけ手動 | 未決 |
