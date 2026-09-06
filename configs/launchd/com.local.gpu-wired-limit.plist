@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!--
+      起動時に GPU（Metal）が確保できる wired メモリの上限を 448GB に固定する（決定 Q16）。
+      512GB のうち 64GB をノード系と OS に残す。値は MB 単位: 448 * 1024 = 458752。
+      sysctl の値は再起動で既定（全体の約 75%）に戻るため、毎回の起動で設定し直す。
+      root で 1 回だけ実行して終了する（KeepAlive なし）。
+    -->
+    <key>Label</key>
+    <string>com.local.gpu-wired-limit</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/sbin/sysctl</string>
+        <string>-w</string>
+        <string>iogpu.wired_limit_mb=458752</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <false/>
+    <key>StandardOutPath</key>
+    <string>/var/log/gpu-wired-limit.log</string>
+    <key>StandardErrorPath</key>
+    <string>/var/log/gpu-wired-limit.log</string>
+</dict>
+</plist>

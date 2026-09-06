@@ -68,7 +68,7 @@ hidden service は 3 つとも torrc に静的に定義する（Bitcoin Core の
 | `zmqpubhashblock=tcp://127.0.0.1:28332` | 新ブロック通知 | Fulcrum がポーリングより早く追随できる |
 | `rpcthreads=16`, `rpcworkqueue=64` | Fulcrum の初期同期を速くする | 32 コアあるので余裕 |
 | `maxmempool=2000` | mempool を大きめに保持 | メモリに余裕がある。手数料推定の精度が上がる |
-| `blockfilterindex=1` | BIP158 フィルタ（未決 Q19） | 約 10GB。将来の軽量クライアント用 |
+| `blockfilterindex=1`, `peerblockfilters=1` | BIP158 フィルタ（決定 Q19） | 約 10GB。将来の軽量クライアント用。IBD と同時に構築される |
 
 ### 3.3 初回同期（IBD）の見込み
 
@@ -106,6 +106,11 @@ hidden service は 3 つとも torrc に静的に定義する（Bitcoin Core の
 - bitcoind の IBD 完了後に開始する（同時進行は両者が遅くなる）。
 - 全ブロックを RPC で読んでインデックスを作る。1〜2 日を見込む。
 - 完了後の作業: `fast-sync` 行を削除して再起動。
+
+### 4.4 開始タイミング（決定 N4）
+
+- Fulcrum の LaunchDaemon は最初は登録しない。bitcoind の `verificationprogress` が 0.9999 以上になってから `com.local.fulcrum.plist` を bootstrap する。
+- 理由: IBD 中に Fulcrum を動かすと、両者がディスク I/O と RPC を取り合って合計時間が伸びる。順番にやる方が読みやすく安定する。
 
 ## 5. Tor
 
@@ -162,7 +167,15 @@ sudo chown -R <admin>:staff /opt/stack/models
 ```
 
 - `_btcnode` はログインシェル無し、パスワード無し、管理者グループに入れない。
-- 管理者ユーザーは `sudo -u _btcnode` で `bitcoin-cli` を叩くか、クッキーファイルを読める権限を自分に付ける（後者は `chmod 640` とグループ設定で対応）。
+- 管理者ユーザーは `sudo -u _btcnode` 経由で `bitcoin-cli` と `FulcrumAdmin` を叩く（決定 N3）。クッキーファイルの権限は既定（`_btcnode` のみ読める）のまま変えない。
+- 管理者のシェルに alias を置いて短くする（`configs/macbook/` ではなく Mac Studio 側の `~/.zshrc`）:
+
+```
+alias btc='sudo -u _btcnode /opt/stack/bin/bitcoin-cli -datadir=/opt/stack/bitcoin'
+alias fadmin='sudo -u _btcnode /opt/stack/bin/FulcrumAdmin -p 8000'
+```
+
+- 監視スクリプトは `_btcnode` 自身で動くので sudo は不要。
 
 ## 8. SSH
 
@@ -200,7 +213,7 @@ curl --silent --socks5-hostname 127.0.0.1:9050 \
 | # | 項目 | 状態 |
 |---|---|---|
 | N1 | Fulcrum の arm64 公式バイナリの有無（Q18） | 着手時に確認 |
-| N2 | blockfilterindex の有効化（Q19） | 未決 |
-| N3 | 管理者ユーザーから `bitcoin-cli` を叩く方法（sudo か、クッキーのグループ読み取りか） | 未決 |
-| N4 | Fulcrum の初期同期を bitcoind の IBD 完了後に始める運用にするか、同時に始めるか | 案: 完了後 |
+| N2 | blockfilterindex の有効化（Q19） | **決定: 有効** |
+| N3 | 管理者ユーザーから `bitcoin-cli` を叩く方法 | **決定: `sudo -u _btcnode`＋alias** |
+| N4 | Fulcrum の初期同期の開始タイミング | **決定: IBD 完了後** |
 | N5 | 監視スクリプトの実装（設計は上記） | フェーズ 2 |

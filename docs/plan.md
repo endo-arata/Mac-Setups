@@ -146,7 +146,8 @@
 - Python 環境: Homebrew の `uv` で専用の仮想環境を作り、システムの Python を汚さない。管理者ユーザーの領域に置く（ノード系のサービスユーザーとは分ける）。
 - モデル置き場: `/opt/stack/models`（Hugging Face のキャッシュ先を環境変数 `HF_HOME` でここに向ける）。MLX 形式に変換済みのモデルは `mlx-community` から取得する。
 - 最初に試すモデル（案）: 中型（70B〜235B 級）で速度を確認 → 最大級（DeepSeek V3/R1 級、4bit で約 400GB）を試す。
-- GPU メモリ上限: `sudo sysctl iogpu.wired_limit_mb=458752`（448GB）。再起動で戻るため、LLM を使うときだけ設定する手順にするか、launchd で起動時に設定するかは未決。
+- GPU メモリ上限（決定 Q16）: 起動時に LaunchDaemon（`configs/launchd/com.local.gpu-wired-limit.plist`）で `iogpu.wired_limit_mb=458752`（448GB）を設定する。ノード系と OS の 64GB は GPU から構造的に守られる。
+- 上限を 448GB にしても、実際に LLM を動かしていない間はメモリは空いたままなので、ノード系の運用に影響は無い。
 - MacBook から使う場合は OpenAI 互換 API を LAN 内にのみ公開する（外出先からは使わない前提。必要になれば hidden service 化を検討）。
 
 ## 6. セキュリティ方針（案）
@@ -232,6 +233,9 @@
 | Q17 | Tails の永続ストレージで Electrum 機能が有効か | 有効 / 未設定 | **確認済み: 有効** |
 | Q14 | bitcoind の P2P 経路 | Tor のみ（onlynet=onion） / Tor＋クリアネット | **決定: Tor のみ** |
 | Q15 | MacBook 側の Tor クライアント | Homebrew の tor 常駐 / Tor Browser 起動時のみ | **決定: Homebrew の tor を常駐** |
-| Q16 | GPU メモリ上限の設定タイミング | 起動時に固定 / LLM 使用時だけ手動 | 未決 |
+| Q16 | GPU メモリ上限の設定タイミング | 起動時に固定 / LLM 使用時だけ手動 | **決定: 起動時に launchd で 448GB に固定** |
 | Q18 | Fulcrum の Apple Silicon 向け公式バイナリの有無 | 公式 arm64 バイナリ / ソースビルド | 未決（着手時にリリースページで確認） |
-| Q19 | Bitcoin Core の blockfilterindex（BIP158） | 有効（約 10GB、将来の軽量クライアント用） / 無効 | 未決 |
+| Q19 | Bitcoin Core の blockfilterindex（BIP158） | 有効（約 10GB、将来の軽量クライアント用） / 無効 | **決定: 有効** |
+| Q20 | macOS の自動アップデート方針 | 自動適用 / 通知のみで手動適用 / 無効 | 未決 |
+| Q21 | Bitcoin Core / Fulcrum / Tor の更新方針 | 新版が出たら都度 / 数か月ごとにまとめて / セキュリティ修正のみ | 未決 |
+| Q22 | 時刻同期・スリープ・Spotlight・Time Machine など macOS の固有設定 | 設計書に一覧化して確定 | 未決 |
