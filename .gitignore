@@ -1,0 +1,11 @@
+# 秘密情報は絶対にコミットしない
+**/secrets/
+**/*.env
+**/hs-*/
+**/hostname
+**/hs_ed25519_secret_key
+**/*.auth_private
+**/*.auth
+**/.cookie
+**/*.pem
+**/*.key

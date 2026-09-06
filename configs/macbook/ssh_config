@@ -1,0 +1,21 @@
+# MacBook 側 ~/.ssh/config に追記する内容
+# 前提: brew install tor && brew services start tor  （SOCKS 127.0.0.1:9050 が常駐）
+#       SSH hidden service のクライアント認証鍵を
+#       /opt/homebrew/etc/tor/onion_auth/<zzz>.auth_private に置き、
+#       /opt/homebrew/etc/tor/torrc に  ClientOnionAuthDir /opt/homebrew/etc/tor/onion_auth  を追加。
+
+# 自宅（LAN 直結）
+Host studio
+    HostName 192.168.<x>.<y>
+    User <管理者ユーザー名>
+    IdentityFile ~/.ssh/id_ed25519_studio
+    IdentitiesOnly yes
+
+# 外出先（Tor hidden service 経由）
+Host studio-tor
+    HostName <hs-ssh の .onion アドレス>
+    User <管理者ユーザー名>
+    IdentityFile ~/.ssh/id_ed25519_studio
+    IdentitiesOnly yes
+    ProxyCommand nc -x 127.0.0.1:9050 -X 5 %h %p
+    ServerAliveInterval 30

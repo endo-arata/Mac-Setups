@@ -1,0 +1,30 @@
+# /opt/stack/tor/torrc
+# Tor 設定案（docs/node-design.md 5.2 を参照）
+# _btcnode ユーザーで起動する。ディレクトリはすべて _btcnode 所有・700。
+
+DataDirectory /opt/stack/tor/data
+Log notice file /opt/stack/tor/tor.log
+RunAsDaemon 0
+
+# bitcoind の発信用 SOCKS
+SocksPort 127.0.0.1:9050
+
+# ControlPort は使わない（hidden service は下で静的に定義）
+
+# ---- hidden service: bitcoind P2P 受信 ----
+HiddenServiceDir /opt/stack/tor/hs-bitcoind
+HiddenServiceVersion 3
+HiddenServicePort 8333 127.0.0.1:8334
+
+# ---- hidden service: Fulcrum（Tails の Electrum が繋ぐ先）----
+HiddenServiceDir /opt/stack/tor/hs-fulcrum
+HiddenServiceVersion 3
+HiddenServicePort 50001 127.0.0.1:50001
+
+# ---- hidden service: SSH（クライアント認証あり）----
+# /opt/stack/tor/hs-ssh/authorized_clients/macbook.auth に
+#   descriptor:x25519:<MacBook 側で生成した公開鍵>
+# を置く。鍵を持たないクライアントからは存在自体を検出できない。
+HiddenServiceDir /opt/stack/tor/hs-ssh
+HiddenServiceVersion 3
+HiddenServicePort 22 127.0.0.1:22

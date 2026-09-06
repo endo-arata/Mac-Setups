@@ -1,6 +1,7 @@
 # Mac Studio (M3 Ultra / 512GB) 設計書
 
-- 版: v0.5（設計中。決定事項は「決定」、未決は「未決」と明記する）
+- 版: v0.6（設計中。決定事項は「決定」、未決は「未決」と明記する）
+- 関連文書: `docs/node-design.md`（ノード周りの詳細設計）、`configs/`（設定ファイル案）、`docs/tails-electrum.md`（Tails 側の手順）
 - 最終更新: 2026-09-06
 
 ## 1. 目的と原則
@@ -52,7 +53,8 @@
 ```
 
 - **ウォレットは Tails 上の Electrum（既存）をそのまま使う（決定）**。Tails は全通信を Tor に強制し、LAN 直結を許さないため、Electrum からの接続は自宅でも外出先でも **Fulcrum の .onion 経由に統一**される。設定変更は「接続先サーバーを自分の .onion に固定し、他サーバーへの自動接続を切る」の 1 点のみ。
-- Tails 側の準備: Tails の永続ストレージで「Electrum」機能を有効にし、ウォレットファイルとサーバー設定が再起動後も残るようにする（未確認の場合は要確認）。
+- Tails 側は永続ストレージの Electrum 機能が有効（確認済み）。サーバー設定を一度 .onion に固定すれば再起動後も保持される。
+- 署名形態: Tails の Electrum がシードを持ち、そこで署名する（現状維持、決定）。将来「監視専用＋オフライン署名」やハードウェアウォレットに分ける場合も、Fulcrum 側の構成は変わらない。
 - MacBook Air は管理端末専用。ウォレットも秘密鍵も置かない。自宅では LAN 直結、外出先では SSH の hidden service 経由で Mac Studio に入る（決定）。
 - グローバル IP へのポート開放は一切しない（決定）。
 - Ethereum ノードは立てない。MetaMask は従来通り外部 RPC を使う（決定）。
@@ -98,7 +100,8 @@
 - 主要設定（案）:
   - `txindex=1`（決定。任意の txid を自分のノードで引けるようにする。mempool 自前ホストの前提条件でもある。ディスクを約 60GB 追加で使う）
   - `server=1`, RPC はローカルのみ許可
-  - `proxy=127.0.0.1:9050`（Tor 経由で P2P）, `listen=1`, `bind=127.0.0.1`, onion サービスで受信
+  - `proxy=127.0.0.1:9050` と `onlynet=onion`（決定: P2P は Tor のみ。自宅 IP を Bitcoin ネットワークに一切出さない。初回同期は 1 週間程度を見込む）
+  - 受信側は torrc に静的に定義した hidden service で受ける（`bind=127.0.0.1:8334=onion`、`externalip=<onion>`）。Tor の ControlPort は使わない
   - `dbcache=16384`（IBD 中）→ 同期後 `4096` に変更
   - `prune=0`
 - 自動起動: launchd（LaunchDaemon）。
@@ -128,7 +131,7 @@
 - **管理（MacBook、自宅）**: Mac Studio に固定のプライベート IP（ルーターの DHCP 予約）と LAN 内ホスト名を与え、SSH は直接接続する。
 - **管理（MacBook、外出先）**: MacBook 上の Tor クライアント経由で SSH の .onion に接続する。速度は落ちるが、第三者のサーバーを一切介さない。
 - **使わないもの**: Tailscale などのメッシュ VPN、ルーターのポート開放、DDNS。
-- MacBook 側の準備: `tor` を Homebrew で入れ、`~/.ssh/config` で .onion ホストに対して `ProxyCommand`（`nc -x 127.0.0.1:9050 %h %p`）を設定する。
+- MacBook 側の準備（決定）: `tor` を Homebrew で入れて `brew services` で常駐させ、`~/.ssh/config` で .onion ホストに対して `ProxyCommand`（`nc -x 127.0.0.1:9050 -X 5 %h %p`）を設定する。SSH の hidden service はクライアント認証付きにし、MacBook の認証鍵を Tor の `ClientOnionAuthDir` に置く。
 
 ### 5.5 mempool.space 自前ホスト（フェーズ 2、暫定採用。ネイティブ導入の手間を要確認）
 
@@ -176,6 +179,8 @@
 ## 7. 運用方針（案）
 
 - UPS を導入する（決定）。停電時に bitcoind と Fulcrum を安全停止させてから電源を落とす。chainstate や Fulcrum の DB が壊れると再同期で数日を失う。macOS は USB 接続の UPS を標準で認識し、「システム設定 > バッテリー」でシャットダウン条件を設定できる。
+  - Mac Studio の実消費は高負荷でも 300W 前後なので、500〜750VA クラスで足りる。ルーターと ONU も同じ UPS に繋ぎ、短時間の停電では Tor 接続が切れないようにする。
+  - launchd の `ExitTimeOut` を長め（bitcoind は 600 秒）に設定し、シャットダウン時に dbcache のフラッシュが完了する前に強制終了されないようにする。
 - 停電復帰後は FileVault のため自動起動しない。物理的にパスワードを入れて復帰させる（設計上の割り切り）。
 - バックアップ（決定: 暗号化した外付け SSD / USB メモリ）:
   - 対象: `/opt/stack/{bitcoin/bitcoin.conf, fulcrum/fulcrum.conf, fulcrum/証明書, tor/torrc, tor/hidden service ディレクトリ, monitor/}` と `/Library/LaunchDaemons/com.local.*.plist`。合計で数 MB。
@@ -224,7 +229,9 @@
 | Q11 | ログイン・ユーザー構成 | 管理者 1 ユーザー / サービス専用ユーザーを分ける | **決定: 管理者＋サービス専用ユーザー `_btcnode`** |
 | Q12 | 設定・鍵のバックアップ先 | 外付け SSD / MacBook / 紙（Tor 鍵は小さい） | **決定: 暗号化した外付け SSD / USB メモリ** |
 | Q13 | Fulcrum の SSL 証明書 | 自己署名（Electrum 側で固定して信頼） / 使わず Tor のみ | **決定: Tor のみ（TCP 50001 を hidden service で公開）。ウォレットが Tails のため LAN 直結が無い** |
-| Q17 | Tails の永続ストレージで Electrum 機能が有効か | 有効 / 未設定 | 未決（要確認） |
-| Q14 | bitcoind の P2P 経路 | Tor のみ（onlynet=onion） / Tor＋クリアネット | 未決 |
-| Q15 | MacBook 側の Tor クライアント | Homebrew の tor 常駐 / Tor Browser 起動時のみ | 未決 |
+| Q17 | Tails の永続ストレージで Electrum 機能が有効か | 有効 / 未設定 | **確認済み: 有効** |
+| Q14 | bitcoind の P2P 経路 | Tor のみ（onlynet=onion） / Tor＋クリアネット | **決定: Tor のみ** |
+| Q15 | MacBook 側の Tor クライアント | Homebrew の tor 常駐 / Tor Browser 起動時のみ | **決定: Homebrew の tor を常駐** |
 | Q16 | GPU メモリ上限の設定タイミング | 起動時に固定 / LLM 使用時だけ手動 | 未決 |
+| Q18 | Fulcrum の Apple Silicon 向け公式バイナリの有無 | 公式 arm64 バイナリ / ソースビルド | 未決（着手時にリリースページで確認） |
+| Q19 | Bitcoin Core の blockfilterindex（BIP158） | 有効（約 10GB、将来の軽量クライアント用） / 無効 | 未決 |
