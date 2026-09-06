@@ -1,6 +1,6 @@
 # Mac Studio (M3 Ultra / 512GB) 設計書
 
-- 版: v0.1（設計中。決定事項は「決定」、未決は「未決」と明記する）
+- 版: v0.2（設計中。決定事項は「決定」、未決は「未決」と明記する）
 - 最終更新: 2026-09-06
 
 ## 1. 目的と原則
@@ -18,6 +18,8 @@
 - **CLI で完結**: 操作はターミナルと設定ファイルで行う。自作プログラミングは前提にしない（既製ツール＋設定＋シェル）。
 - **再現可能**: 設定ファイルと手順はこのリポジトリに残し、再構築できる状態を保つ。
 - **プルーニングしない**: 8TB あるので全ブロックを保持し、Fulcrum の完全インデックスを作る。
+- **第三者サービスに依存しない**: リモートアクセスは LAN と Tor のみ。Tailscale 等の調整サーバーを介するものは使わない（決定）。
+- **すべてネイティブ**: Homebrew・公式バイナリ・launchd で構成し、Docker は使わない（決定）。macOS 上のコンテナは仮想マシン経由で I/O が遅く、管理系統も 2 つに割れるため。
 
 ## 2. ハードウェア
 
@@ -29,20 +31,25 @@
 | SSD | 8TB 内蔵 |
 | 運用形態 | 24 時間稼働のサーバー（決定） |
 | 操作端末 | MacBook Air（既存）、Ryzen 機（既存） |
+| 電源 | UPS を新規導入する（決定）。USB 接続で macOS に認識させ、バッテリー残量低下時に自動で安全停止させる |
+| 設置 | ヘッドレス。ただし FileVault のため、再起動時に使う小型モニタとキーボードを手の届く場所に置く |
 
 ## 3. 全体アーキテクチャ
 
 ```
-[MacBook Air] --(Tailscale or LAN / Tor)--> [Mac Studio]
-   Electrum ウォレット                          |
-                                               +-- Bitcoin Core (bitcoind)  ... P2P は Tor 経由
-                                               +-- Fulcrum (Electrum server) ... bitcoind の RPC を読む
-                                               +-- Tor (hidden service)     ... Fulcrum を .onion で公開
-                                               +-- [フェーズ2] mempool.space 自前ホスト
-                                               +-- [フェーズ3] LLM ランタイム（LM Studio / MLX 等）
+[MacBook Air]
+   Electrum ウォレット ---(自宅: LAN 直結 / 外出先: Tor .onion)---> [Mac Studio]
+   ssh クライアント   ---(自宅: LAN 直結 / 外出先: Tor .onion)--->     |
+                                                                      +-- Bitcoin Core (bitcoind)  ... P2P は Tor 経由
+                                                                      +-- Fulcrum (Electrum server) ... bitcoind の RPC を読む
+                                                                      +-- Tor (hidden service)     ... Fulcrum / SSH を .onion で公開
+                                                                      +-- [フェーズ2] mempool.space 自前ホスト（LAN 内、必要なら .onion も）
+                                                                      +-- [フェーズ3] LLM ランタイム（LAN 内から API 利用）
 ```
 
 - ウォレットは MacBook 側の Electrum（既存）をそのまま使い、接続先だけ自前 Fulcrum に固定する（決定）。
+- リモートアクセスは「自宅では LAN、外出先では Tor の hidden service」の二経路のみ（決定）。外出先から使うために MacBook 側にも Tor クライアントを入れる（Electrum は SOCKS プロキシ経由で .onion に接続できる）。
+- グローバル IP へのポート開放は一切しない（決定）。
 - Ethereum ノードは立てない。MetaMask は従来通り外部 RPC を使う（決定）。
 - Lightning / BTCPay は当面見送り。必要になったら別フェーズで検討（未決 → 保留）。
 
@@ -82,7 +89,7 @@
 ### 5.1 Bitcoin Core（決定）
 
 - 役割: フルノード。全ブロックを保持し検証する。
-- 導入: Homebrew もしくは公式バイナリ（未決: どちらにするか）。
+- 導入: 公式リリースの macOS (arm64) バイナリを使い、リリース署名（GPG / SHA256SUMS）を検証してから配置する（決定）。Homebrew 版は更新タイミングと署名検証の手順が Homebrew 任せになるため採らない。
 - 主要設定（案）:
   - `txindex=1`（Fulcrum には不要だが、mempool 等の利便性向上のため有効化を検討。未決）
   - `server=1`, RPC はローカルのみ許可
@@ -94,7 +101,7 @@
 ### 5.2 Fulcrum（決定）
 
 - 役割: Electrum プロトコルのサーバー。自分のウォレットの接続先。
-- 導入: 公式リリースの macOS バイナリ、またはソースからビルド（未決）。
+- 導入: 公式リリースの macOS (arm64) バイナリを署名検証のうえ使用（決定）。公式 macOS ビルドが無いバージョンの場合のみソースからビルドする。
 - 主要設定（案）:
   - bitcoind の RPC を参照
   - TCP 50001 / SSL 50002 をローカルおよび Tor hidden service に公開
@@ -104,40 +111,43 @@
 ### 5.3 Tor（決定）
 
 - 役割: (a) bitcoind の P2P を Tor 経由にして IP と取引の紐づけを防ぐ、(b) Fulcrum を hidden service として公開し、外出先からも自前サーバーに繋げる。
-- 導入: Homebrew の `tor`。
+- 導入: Homebrew の `tor`（決定）。
+- hidden service は 2 つ用意する: (1) Fulcrum 用（50001/50002）、(2) SSH 用（22）。それぞれ別の .onion アドレスにし、SSH 側はクライアント認証（authorized clients）を有効にして第三者からは存在自体を見えなくする。
 - hidden service の秘密鍵はバックアップ対象（失うと .onion アドレスが変わる）。
 
-### 5.4 リモートアクセス（未決）
+### 5.4 リモートアクセス（決定: LAN + Tor）
 
-候補:
+- **自宅（LAN）**: Mac Studio に固定のプライベート IP（ルーターの DHCP 予約）と LAN 内ホスト名を与え、Electrum と SSH は直接接続する。
+- **外出先**: MacBook 上の Tor クライアント経由で、Fulcrum の .onion と SSH の .onion に接続する。速度は落ちるが、第三者のサーバーを一切介さない。
+- **使わないもの**: Tailscale などのメッシュ VPN、ルーターのポート開放、DDNS。
+- MacBook 側の準備: `tor` を Homebrew で入れて常駐させ、Electrum のプロキシ設定を `socks5://127.0.0.1:9050` にする。SSH は `~/.ssh/config` で .onion ホストに対して `ProxyCommand` を設定する。
 
-- **Tailscale**（推奨候補）: MacBook からどこにいても Mac Studio に到達できる。Electrum の接続先を Tailscale の IP に固定できる。
-- **LAN のみ + Tor**: 自宅では LAN、外では Fulcrum の .onion を使う。
-- **SSH over Tor**: 管理用 SSH も hidden service 経由にする。
-
-### 5.5 mempool.space 自前ホスト（フェーズ 2、暫定採用）
+### 5.5 mempool.space 自前ホスト（フェーズ 2、暫定採用。ネイティブ導入の手間を要確認）
 
 - 役割: 自分のノードをソースにしたブロックエクスプローラー。トランザクション確認や手数料推定を、外部サイトにアドレスを送らずに行える。
-- 導入: Docker（OrbStack など）での compose 構成が一般的。macOS でのコンテナ運用方針は未決。
+- 導入: 公式手順は Docker 前提だが、本計画は Docker を使わないので、Node.js + MariaDB + nginx を Homebrew で入れてバックエンド・フロントエンドをソースからビルドする（ネイティブ導入）。ノード本体より保守の手間が大きいため、フェーズ 2 の着手時に「導入する価値があるか」を再判断する（未決）。
+- 公開範囲: LAN 内の HTTP のみ。外出先から使いたくなったら hidden service を追加する。
 
 ### 5.6 LLM ランタイム（フェーズ 3）
 
 - 役割: まずは「試してみる」。MacBook Air との差を体感する。
 - 導入候補: LM Studio（GUI、手軽）、Ollama（CLI）、MLX（Apple 純正の推論基盤、最速）。
 - 最初に試すモデル（案）: 中型（70B〜235B 級）で速度を確認 → 最大級（DeepSeek V3/R1 級、4bit で約 400GB）を試す。
-- MacBook から使う場合は OpenAI 互換 API を Tailscale 経由で提供する。
+- MacBook から使う場合は OpenAI 互換 API を LAN 内にのみ公開する（外出先からは使わない前提。必要になれば hidden service 化を検討）。
 
 ## 6. セキュリティ方針（案）
 
-- Mac Studio は基本ヘッドレス運用。物理的にはディスプレイ無し、SSH で操作。
-- FileVault の扱いは未決（有効にすると停電後の再起動時にパスワード入力が必要で、リモート復帰できない）。
-- RPC・Fulcrum・LLM API はすべてローカル or Tailscale or Tor のみに公開。グローバル IP に直接ポートを開けない。
+- Mac Studio は基本ヘッドレス運用。SSH で操作。再起動時のみ物理モニタとキーボードを使う。
+- **FileVault 有効（決定）**。盗難・持ち出し時のデータ保護を優先する。代償として、停電や再起動のたびに物理的にパスワード入力が必要（LaunchDaemon もロック解除後にしか起動しない）。UPS の導入と、計画停止時の `fdesetup authrestart`（次回 1 回だけパスワード不要で再起動）で運用負担を抑える。
+- RPC・Fulcrum・LLM API はすべて LAN または Tor のみに公開。グローバル IP に直接ポートを開けない。
+- SSH は公開鍵認証のみ。パスワード認証は無効化する。
 - ウォレットの秘密鍵は Mac Studio に置かない。署名は MacBook（既存 Electrum）で行う。
 - 将来的にハードウェアウォレット導入を検討する余地を残す（保留）。
 
 ## 7. 運用方針（案）
 
-- UPS を用意する（停電時のディスク破損防止。chainstate の破損は再同期で数日を失う）。
+- UPS を導入する（決定）。停電時に bitcoind と Fulcrum を安全停止させてから電源を落とす。chainstate や Fulcrum の DB が壊れると再同期で数日を失う。macOS は USB 接続の UPS を標準で認識し、「システム設定 > バッテリー」でシャットダウン条件を設定できる。
+- 停電復帰後は FileVault のため自動起動しない。物理的にパスワードを入れて復帰させる（設計上の割り切り）。
 - バックアップ対象: 設定ファイル群、Tor hidden service 鍵、launchd 定義。チェーンデータはバックアップしない（再同期可能）。
 - 監視: 最低限、bitcoind と Fulcrum の生存確認とブロック高の追随を確認する仕組みを用意する（方法は未決）。
 - 更新: Bitcoin Core / Fulcrum / Tor のバージョンアップ手順を定める（未決）。
@@ -156,11 +166,14 @@
 
 | # | 項目 | 選択肢 | 状態 |
 |---|---|---|---|
-| Q1 | リモートアクセス方式 | Tailscale / LAN+Tor / SSH over Tor | 未決 |
-| Q2 | FileVault | 有効（安全だが停電復帰が手動） / 無効（自動復帰） | 未決 |
-| Q3 | コンテナ方針 | すべてネイティブ / mempool 等のみ Docker | 未決 |
-| Q4 | Bitcoin Core / Fulcrum の導入経路 | Homebrew / 公式バイナリ / ソースビルド | 未決 |
+| Q1 | リモートアクセス方式 | Tailscale / LAN+Tor / SSH over Tor | **決定: LAN + Tor（SSH も hidden service）** |
+| Q2 | FileVault | 有効（安全だが停電復帰が手動） / 無効（自動復帰） | **決定: 有効。再起動は手動ログイン** |
+| Q3 | コンテナ方針 | すべてネイティブ / mempool 等のみ Docker | **決定: すべてネイティブ** |
+| Q4 | Bitcoin Core / Fulcrum の導入経路 | Homebrew / 公式バイナリ / ソースビルド | **決定: 公式バイナリ＋署名検証（Tor のみ Homebrew）** |
 | Q5 | txindex | 有効 / 無効 | 未決 |
 | Q6 | 監視方法 | シェル＋launchd / 既製ツール | 未決 |
-| Q7 | UPS | 導入する / しない | 未決 |
+| Q7 | UPS | 導入する / しない | **決定: 導入する** |
 | Q8 | LLM ランタイム | LM Studio / Ollama / MLX | 未決 |
+| Q9 | mempool.space をネイティブ導入する価値 | 導入する / 見送る | 未決（フェーズ 2 着手時に判断） |
+| Q10 | ネットワーク | 固定 IP の割り当て方、LAN 内ホスト名、Wi‑Fi か有線か | 未決 |
+| Q11 | ログイン・ユーザー構成 | 管理者 1 ユーザー / サービス専用ユーザーを分ける | 未決 |
