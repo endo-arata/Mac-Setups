@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- 10 分ごとに監視スクリプトを _btcnode で実行する（docs/monitoring.md） -->
+    <key>Label</key>
+    <string>com.local.monitor</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/opt/stack/monitor/check.sh</string>
+    </array>
+    <key>UserName</key>
+    <string>_btcnode</string>
+    <key>WorkingDirectory</key>
+    <string>/opt/stack/monitor</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin</string>
+    </dict>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>StartInterval</key>
+    <integer>600</integer>
+    <key>StandardOutPath</key>
+    <string>/opt/stack/monitor/launchd.log</string>
+    <key>StandardErrorPath</key>
+    <string>/opt/stack/monitor/launchd.log</string>
+</dict>
+</plist>
