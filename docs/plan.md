@@ -1,7 +1,7 @@
 # Mac Studio (M3 Ultra / 512GB) 設計書
 
-- 版: v0.6（設計中。決定事項は「決定」、未決は「未決」と明記する）
-- 関連文書: `docs/node-design.md`（ノード周りの詳細設計）、`configs/`（設定ファイル案）、`docs/tails-electrum.md`（Tails 側の手順）
+- 版: v0.7（設計中。決定事項は「決定」、未決は「未決」と明記する）
+- 関連文書: `docs/phase0-macos.md`（フェーズ 0 の macOS 初期設定）、`docs/node-design.md`（ノード周りの詳細設計）、`configs/`（設定ファイル案）、`docs/tails-electrum.md`（Tails 側の手順）
 - 最終更新: 2026-09-06
 
 ## 1. 目的と原則
@@ -133,10 +133,10 @@
 - **使わないもの**: Tailscale などのメッシュ VPN、ルーターのポート開放、DDNS。
 - MacBook 側の準備（決定）: `tor` を Homebrew で入れて `brew services` で常駐させ、`~/.ssh/config` で .onion ホストに対して `ProxyCommand`（`nc -x 127.0.0.1:9050 -X 5 %h %p`）を設定する。SSH の hidden service はクライアント認証付きにし、MacBook の認証鍵を Tor の `ClientOnionAuthDir` に置く。
 
-### 5.5 mempool.space 自前ホスト（フェーズ 2、暫定採用。ネイティブ導入の手間を要確認）
+### 5.5 mempool.space 自前ホスト（フェーズ 2、決定: 導入する）
 
 - 役割: 自分のノードをソースにしたブロックエクスプローラー。トランザクション確認や手数料推定を、外部サイトにアドレスを送らずに行える。
-- 導入: 公式手順は Docker 前提だが、本計画は Docker を使わないので、Node.js + MariaDB + nginx を Homebrew で入れてバックエンド・フロントエンドをソースからビルドする（ネイティブ導入）。ノード本体より保守の手間が大きいため、フェーズ 2 の着手時に「導入する価値があるか」を再判断する（未決）。
+- 導入: 公式手順は Docker 前提だが、本計画は Docker を使わないので、Node.js + MariaDB + nginx を Homebrew で入れてバックエンド・フロントエンドをソースからビルドする（ネイティブ導入）。バックエンドは bitcoind の RPC と Fulcrum の Electrum ポート（アドレス検索用）を参照する。詳細設計はフェーズ 1 完了後に `docs/mempool-design.md` として起こす。
 - 公開範囲: LAN 内の HTTP のみ。外出先から使いたくなったら hidden service を追加する。
 
 ### 5.6 LLM ランタイム（フェーズ 3）
@@ -200,7 +200,10 @@
   - 通知本文には**アドレス・残高・txid など資産に紐づく情報を一切含めない**。「bitcoind 停止」「ブロック高停滞」「ディスク残量」程度の汎用文言に限定する。
   - 通知の送信は Tor 経由（`curl --socks5-hostname 127.0.0.1:9050`）にし、通知サービス側に自宅 IP を渡さない。
   - Bot トークンは設定ファイルに平文で置かず、macOS キーチェーンまたは権限を絞ったファイルに置く。
-- 更新: Bitcoin Core / Fulcrum / Tor のバージョンアップ手順を定める（未決）。
+- 更新（決定）:
+  - **macOS**: 「セキュリティ対応とシステムファイル」の自動インストールは有効。macOS 本体のアップデートは「通知のみ」にし、自分のタイミングで `fdesetup authrestart` を使って適用する（再起動後に物理ログインが要らない）。
+  - **Bitcoin Core / Fulcrum / Tor**: 新版リリースから数週間待ってから適用する。適用時は毎回、署名検証 → `_btcnode` のサービス停止（Fulcrum → bitcoind の順）→ バイナリ差し替え → 起動 → ログ確認、の手順を踏む。Tor は Homebrew の `brew upgrade tor` で更新し、LaunchDaemon を再起動する。
+  - 更新前に設定ファイルのバックアップ（暗号化 USB）が最新であることを確認する。
 
 ## 8. フェーズ計画
 
@@ -225,7 +228,7 @@
 | Q6b | 通知チャット | Telegram / Discord | **決定: Telegram** |
 | Q7 | UPS | 導入する / しない | **決定: 導入する** |
 | Q8 | LLM ランタイム | LM Studio / Ollama / MLX | **決定: MLX（mlx-lm）** |
-| Q9 | mempool.space をネイティブ導入する価値 | 導入する / 見送る | 未決（フェーズ 2 着手時に判断） |
+| Q9 | mempool.space をネイティブ導入する価値 | 導入する / 見送る | **決定: フェーズ 2 で導入** |
 | Q10 | ネットワーク | 固定 IP の割り当て方、LAN 内ホスト名、Wi‑Fi か有線か | **決定: 有線 10GbE、DHCP 予約で固定 IP** |
 | Q11 | ログイン・ユーザー構成 | 管理者 1 ユーザー / サービス専用ユーザーを分ける | **決定: 管理者＋サービス専用ユーザー `_btcnode`** |
 | Q12 | 設定・鍵のバックアップ先 | 外付け SSD / MacBook / 紙（Tor 鍵は小さい） | **決定: 暗号化した外付け SSD / USB メモリ** |
@@ -236,6 +239,10 @@
 | Q16 | GPU メモリ上限の設定タイミング | 起動時に固定 / LLM 使用時だけ手動 | **決定: 起動時に launchd で 448GB に固定** |
 | Q18 | Fulcrum の Apple Silicon 向け公式バイナリの有無 | 公式 arm64 バイナリ / ソースビルド | 未決（着手時にリリースページで確認） |
 | Q19 | Bitcoin Core の blockfilterindex（BIP158） | 有効（約 10GB、将来の軽量クライアント用） / 無効 | **決定: 有効** |
-| Q20 | macOS の自動アップデート方針 | 自動適用 / 通知のみで手動適用 / 無効 | 未決 |
-| Q21 | Bitcoin Core / Fulcrum / Tor の更新方針 | 新版が出たら都度 / 数か月ごとにまとめて / セキュリティ修正のみ | 未決 |
-| Q22 | 時刻同期・スリープ・Spotlight・Time Machine など macOS の固有設定 | 設計書に一覧化して確定 | 未決 |
+| Q20 | macOS の自動アップデート方針 | 自動適用 / 通知のみで手動適用 / 無効 | **決定: セキュリティ対応は自動、OS 本体は通知のみ** |
+| Q21 | Bitcoin Core / Fulcrum / Tor の更新方針 | 新版が出たら都度 / 数か月ごとにまとめて / セキュリティ修正のみ | **決定: 新版から数週間待って適用** |
+| Q22 | macOS の固有設定一覧 | `docs/phase0-macos.md` に一覧化 | 一覧化済み。個別の未決は Q23〜Q26 |
+| Q23 | Apple ID | サインインしない / サインインする | 未決 |
+| Q24 | 物理キーボード | USB 有線（Bluetooth を切れる） / Bluetooth | 未決 |
+| Q25 | `/opt/stack` を別 APFS ボリュームにするか | 別ボリューム / 通常のフォルダ | 未決 |
+| Q26 | Time Machine | 使わない / 設定と鍵だけ対象にして使う | 未決 |
