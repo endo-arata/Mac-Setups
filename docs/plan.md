@@ -1,7 +1,7 @@
 # Mac Studio (M3 Ultra / 512GB) 設計書
 
-- 版: v0.7（設計中。決定事項は「決定」、未決は「未決」と明記する）
-- 関連文書: `docs/phase0-macos.md`（フェーズ 0 の macOS 初期設定）、`docs/node-design.md`（ノード周りの詳細設計）、`configs/`（設定ファイル案）、`docs/tails-electrum.md`（Tails 側の手順）
+- 版: v0.9（設計中。決定事項は「決定」、未決は「未決」と明記する）
+- 関連文書: `docs/phase0-macos.md`（フェーズ 0 の macOS 初期設定）、`docs/node-design.md`（ノード周りの詳細設計）、`docs/phase1-node.md`（フェーズ 1 の実行手順）、`configs/`（設定ファイル案）、`docs/tails-electrum.md`（Tails 側の手順）
 - 最終更新: 2026-09-06
 
 ## 1. 目的と原則
@@ -122,7 +122,8 @@
 
 - 役割: (a) bitcoind の P2P を Tor 経由にして IP と取引の紐づけを防ぐ、(b) Fulcrum を hidden service として公開し、外出先からも自前サーバーに繋げる。
 - 導入: Homebrew の `tor`（決定）。
-- hidden service は 2 つ用意する: (1) Fulcrum 用（50001/50002）、(2) SSH 用（22）。それぞれ別の .onion アドレスにし、SSH 側はクライアント認証（authorized clients）を有効にして第三者からは存在自体を見えなくする。
+- hidden service は 3 つ用意する: (1) bitcoind の P2P 受信用（8333）、(2) Fulcrum 用（50001）、(3) SSH 用（22）。それぞれ別の .onion アドレスにし、SSH 側はクライアント認証（authorized clients）を有効にして第三者からは存在自体を見えなくする。
+- SSH 用のクライアント認証鍵は 2 組発行する（決定）: MacBook 用と予備。予備の秘密鍵は暗号化 USB に保管し、MacBook を失ったときに別端末から入るために使う。
 - hidden service の秘密鍵はバックアップ対象（失うと .onion アドレスが変わる）。
 
 ### 5.4 リモートアクセス（決定: LAN + Tor）
@@ -144,7 +145,7 @@
 - 役割: まずは「試してみる」。MacBook Air との差を体感する。
 - ランタイム: **MLX（mlx-lm）を直接使う（決定）**。Apple 純正の推論基盤で最速。CLI で完結し、`mlx_lm.chat`（対話）、`mlx_lm.generate`（単発）、`mlx_lm.server`（OpenAI 互換 API）が揃っている。
 - Python 環境: Homebrew の `uv` で専用の仮想環境を作り、システムの Python を汚さない。管理者ユーザーの領域に置く（ノード系のサービスユーザーとは分ける）。
-- モデル置き場: `/opt/stack/models`（Hugging Face のキャッシュ先を環境変数 `HF_HOME` でここに向ける）。MLX 形式に変換済みのモデルは `mlx-community` から取得する。
+- モデル置き場: `/opt/stack/data/models`（Hugging Face のキャッシュ先を環境変数 `HF_HOME` でここに向ける）。MLX 形式に変換済みのモデルは `mlx-community` から取得する。
 - 最初に試すモデル（案）: 中型（70B〜235B 級）で速度を確認 → 最大級（DeepSeek V3/R1 級、4bit で約 400GB）を試す。
 - GPU メモリ上限（決定 Q16）: 起動時に LaunchDaemon（`configs/launchd/com.local.gpu-wired-limit.plist`）で `iogpu.wired_limit_mb=458752`（448GB）を設定する。ノード系と OS の 64GB は GPU から構造的に守られる。
 - 上限を 448GB にしても、実際に LLM を動かしていない間はメモリは空いたままなので、ノード系の運用に影響は無い。
@@ -161,18 +162,31 @@
   - bitcoind・Fulcrum・Tor はすべてこのユーザーで LaunchDaemon として起動する（`UserName` キーで指定）。FileVault のロック解除後、誰もログインしなくても起動する。
   - 監視スクリプトも同ユーザーで動かす。Telegram の Bot トークンはこのユーザーのみ読める（`chmod 600`）ファイルに置く。
 
-### 6.1 ディレクトリ配置（案）
+### 6.1 ディレクトリ配置とボリューム（決定 Q25）
+
+大容量データは別の **暗号化 APFS ボリューム `Stack`** に置き、`/opt/stack/data` にマウントする。設定・鍵・トークンは FileVault で守られるシステムボリューム側の `/opt/stack` に置く。
+
+FileVault が暗号化するのはシステムの Data ボリュームだけで、同じコンテナに追加したボリュームは対象外になる。そのため `Stack` は作成時にパスフレーズ付きで暗号化し、そのパスフレーズを `/opt/stack/secrets/`（root のみ、FileVault 内）に置いて、起動時に LaunchDaemon が自動でアンロック・マウントする。FileVault のパスワードを物理入力した後は、すべて無人で立ち上がる。
 
 ```
-/opt/stack/                 ... ルート（所有者: _btcnode、管理者は読み取りのみ）
-  bin/                      ... bitcoind, bitcoin-cli, Fulcrum などの実行ファイル
-  bitcoin/                  ... bitcoin.conf, blocks/, chainstate/, indexes/
-  fulcrum/                  ... fulcrum.conf, db/, 証明書
-  tor/                      ... torrc, hidden service ディレクトリ（鍵はここ）
-  monitor/                  ... 監視スクリプト、secrets/（Bot トークン）
-  models/                   ... LLM モデル（所有者は管理者ユーザー。LLM はノードと分離）
-/Library/LaunchDaemons/     ... com.local.bitcoind.plist など
+/opt/stack/                 ... システムボリューム側（FileVault で暗号化済み）
+  bin/                      ... bitcoind, bitcoin-cli, Fulcrum などの実行ファイル（root 所有）
+  secrets/                  ... Stack ボリュームのパスフレーズと UUID（root のみ、700）
+  scripts/                  ... mount-stack-volume.sh など（root 所有）
+  bitcoin/                  ... bitcoin.conf, launchd.log
+  fulcrum/                  ... fulcrum.conf, launchd.log
+  tor/                      ... torrc, data/, hidden service ディレクトリ（鍵はここ）
+  monitor/                  ... 監視スクリプト、secrets/（Telegram トークン。_btcnode のみ）
+  data/                     ... ← ここに Stack ボリュームをマウント（nobrowse）
+    .stack-volume-ready     ... マウント検知用マーカー（launchd の KeepAlive/PathState が見る）
+    bitcoin/                ... blocks/, chainstate/, indexes/, .cookie（bitcoind の datadir）
+    fulcrum/db/             ... Fulcrum のインデックス
+    models/                 ... LLM モデル（所有者は管理者ユーザー）
+/Library/LaunchDaemons/     ... com.local.stack-volume.plist, com.local.bitcoind.plist など
 ```
+
+- bitcoind と Fulcrum の LaunchDaemon は `KeepAlive` の `PathState` に `/opt/stack/data/.stack-volume-ready` を指定し、ボリュームがマウントされるまで起動しない・アンマウントされたら止まる。
+- ボリュームを分ける利点: Spotlight 除外が確実（`.metadata_never_index`）、容量の把握が簡単、OS を入れ直してもデータが残る、チェーンデータの暗号化鍵をシステムと分離できる。
 - ウォレットの秘密鍵は Mac Studio にも MacBook にも置かない。署名は Tails 上の Electrum でのみ行う。
 - Mac Studio が侵害されても失われるのは「どのアドレスを監視しているか」という情報までで、資金は動かせない。この分離を崩さない。
 - 将来的にハードウェアウォレット導入を検討する余地を残す（保留）。
@@ -184,7 +198,7 @@
   - launchd の `ExitTimeOut` を長め（bitcoind は 600 秒）に設定し、シャットダウン時に dbcache のフラッシュが完了する前に強制終了されないようにする。
 - 停電復帰後は FileVault のため自動起動しない。物理的にパスワードを入れて復帰させる（設計上の割り切り）。
 - バックアップ（決定: 暗号化した外付け SSD / USB メモリ）:
-  - 対象: `/opt/stack/{bitcoin/bitcoin.conf, fulcrum/fulcrum.conf, fulcrum/証明書, tor/torrc, tor/hidden service ディレクトリ, monitor/}` と `/Library/LaunchDaemons/com.local.*.plist`。合計で数 MB。
+  - 対象: `/opt/stack/{secrets/, scripts/, bitcoin/bitcoin.conf, fulcrum/fulcrum.conf, tor/torrc, tor/hs-*/, monitor/}` と `/Library/LaunchDaemons/com.local.*.plist`。合計で数 MB。`secrets/stack-volume.key` を失うと Stack ボリュームは開けなくなる（再同期で作り直せるが数日を失う）。
   - 対象外: チェーンデータ、Fulcrum の DB、LLM モデル（すべて再取得・再構築可能）。
   - 方法: APFS 暗号化でフォーマットした USB メモリに `tar` で固めてコピー。設定を変えたときに手動で更新する。ディスクは普段は抜いて保管する。
   - 設定ファイルの「内容」はこの Git リポジトリにも残す（鍵・トークン・RPC パスワードは除外し、`.gitignore` で防ぐ）。
@@ -242,7 +256,9 @@
 | Q20 | macOS の自動アップデート方針 | 自動適用 / 通知のみで手動適用 / 無効 | **決定: セキュリティ対応は自動、OS 本体は通知のみ** |
 | Q21 | Bitcoin Core / Fulcrum / Tor の更新方針 | 新版が出たら都度 / 数か月ごとにまとめて / セキュリティ修正のみ | **決定: 新版から数週間待って適用** |
 | Q22 | macOS の固有設定一覧 | `docs/phase0-macos.md` に一覧化 | 一覧化済み。個別の未決は Q23〜Q26 |
-| Q23 | Apple ID | サインインしない / サインインする | 未決 |
-| Q24 | 物理キーボード | USB 有線（Bluetooth を切れる） / Bluetooth | 未決 |
-| Q25 | `/opt/stack` を別 APFS ボリュームにするか | 別ボリューム / 通常のフォルダ | 未決 |
-| Q26 | Time Machine | 使わない / 設定と鍵だけ対象にして使う | 未決 |
+| Q23 | Apple ID | サインインしない / サインインする | **決定: サインインしない** |
+| Q24 | 物理キーボード | USB 有線（Bluetooth を切れる） / Bluetooth | **決定: USB 有線。Bluetooth はオフ** |
+| Q25 | `/opt/stack` を別 APFS ボリュームにするか | 別ボリューム / 通常のフォルダ | **決定: データ部を暗号化 APFS ボリューム `Stack` にし `/opt/stack/data` にマウント** |
+| Q26 | Time Machine | 使わない / 設定と鍵だけ対象にして使う | **決定: 使わない** |
+| Q27 | IBD を Tor のみで行うか | Tor のみ（約 1 週間） / IBD 中だけクリアネット | **決定: Tor のみ** |
+| Q28 | SSH onion のクライアント認証鍵の数 | MacBook のみ / 予備を 1 つ追加 | **決定: MacBook＋予備 1（暗号化 USB 保管）** |

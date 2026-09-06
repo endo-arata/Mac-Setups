@@ -12,7 +12,7 @@
 | 設置 | 通気の良い場所。UPS と同じ場所に置く |
 | 電源 | UPS（500〜750VA）経由。ルーターと ONU も同じ UPS に接続 |
 | ネットワーク | 内蔵 10GbE ポートに有線接続。Wi‑Fi は使わない |
-| 入力 | 初期設定と FileVault 解除用のキーボード。USB 有線を推奨（Bluetooth を完全に切れる。未決 Q24） |
+| 入力 | 初期設定と FileVault 解除用の **USB 有線キーボード**（決定 Q24）。Bluetooth は完全にオフにする |
 | 表示 | 初期設定と再起動時のみ使う小型モニタ（HDMI）。普段は外してよい |
 | USB | UPS の USB 信号ケーブルを Mac Studio に接続（macOS がバッテリー状態を認識する） |
 
@@ -24,7 +24,7 @@
 | アクセシビリティ | スキップ | |
 | ネットワーク | 有線が認識されていることを確認 | |
 | 移行アシスタント | 「今は情報を転送しない」 | 他 Mac の設定を持ち込まない |
-| Apple ID | **サインインしない（推奨、未決 Q23）** | App Store も iCloud も使わない。Apple にこの機体の稼働状況を紐づけない |
+| Apple ID | **サインインしない（決定 Q23）**。「後で設定」を選ぶ | App Store も iCloud も使わない。Apple にこの機体の稼働状況を紐づけない |
 | 利用規約 | 同意 | |
 | アカウント作成 | 管理者ユーザーを 1 人。名前は個人を特定しないもの（例: `admin` ではなく短い任意の語）。パスワードは長いパスフレーズ | このアカウントが SSH ログイン先になる |
 | 位置情報サービス | オフ | |
@@ -67,7 +67,7 @@
 
 - Wi‑Fi: **オフ**（メニューバーからも消す）
 - Ethernet: DHCP のまま。固定 IP はルーター側の DHCP 予約で与える（決定 Q10）。IP を確認してメモする
-- Bluetooth: USB キーボードなら**オフ**（未決 Q24）
+- Bluetooth: **オフ**（決定 Q24。キーボードは USB 有線）
 
 ### 2.4 省エネルギー（デスクトップは「エネルギー」）
 
@@ -86,11 +86,11 @@
 ### 2.6 Spotlight
 
 - 「検索結果」内の Siri の提案などをすべてオフ
-- 「検索のプライバシー」に `/opt/stack` を追加（作成後）。チェーンデータのインデックス作成で I/O を浪費させない
+- `Stack` ボリューム側は `.metadata_never_index` で除外する（3.8）。`/opt/stack` 本体は設定ファイルだけなので除外不要
 
 ### 2.7 Time Machine
 
-- 使わない（推奨、未決 Q26）。設定と鍵は暗号化 USB へ手動でコピーする（決定 Q12）
+- 使わない（決定 Q26）。設定と鍵は暗号化 USB へ手動でコピーする（決定 Q12）。Time Machine の設定画面は開かず、外付けディスクを繋いだときに出る「バックアップに使いますか」は「使用しない」を選ぶ
 
 ## 3. ターミナルで行う設定
 
@@ -169,31 +169,71 @@ brew install tor uv
 - `tor` は Homebrew で入れるが、`brew services` は使わない（`_btcnode` で動かすため。`docs/node-design.md` 5.1）。
 - `uv` は LLM フェーズ用の Python 環境管理（`docs/plan.md` 5.6）。
 
-### 3.8 サービスユーザーとディレクトリ
+### 3.8 サービスユーザーと `/opt/stack`（システムボリューム側）
 
 ```
 sudo sysadminctl -addUser _btcnode -fullName "Bitcoin Node Service" -shell /usr/bin/false -home /opt/stack -password -
-sudo mkdir -p /opt/stack/{bin,bitcoin,fulcrum/db,tor,monitor/secrets,models}
+sudo mkdir -p /opt/stack/{bin,secrets,scripts,bitcoin,fulcrum,tor,monitor/secrets,data}
+sudo chown root:wheel /opt/stack /opt/stack/bin /opt/stack/secrets /opt/stack/scripts /opt/stack/data
+sudo chmod 755 /opt/stack /opt/stack/bin /opt/stack/scripts /opt/stack/data
+sudo chmod 700 /opt/stack/secrets
 sudo chown -R _btcnode:staff /opt/stack/bitcoin /opt/stack/fulcrum /opt/stack/tor /opt/stack/monitor
 sudo chmod 700 /opt/stack/tor /opt/stack/monitor/secrets
-sudo chown root:wheel /opt/stack /opt/stack/bin
-sudo chmod 755 /opt/stack /opt/stack/bin
-sudo chown -R "$(whoami)":staff /opt/stack/models
 ```
 
 - `_btcnode` はログインウインドウに表示されない（アンダースコア始まりのシステムユーザー扱い）。表示される場合は `sudo dscl . -create /Users/_btcnode IsHidden 1`。
-- `/opt/stack` を別 APFS ボリュームにする案（未決 Q25）を採る場合は、ここで `diskutil apfs addVolume` で作成し `/opt/stack` にマウントする。
+- `/opt/stack/data` は次節で作る `Stack` ボリュームのマウントポイント。空のまま root 所有にしておく。
 
-### 3.9 Spotlight 除外とログローテーション
+### 3.9 暗号化 APFS ボリューム `Stack` の作成と自動マウント（決定 Q25）
+
+FileVault は追加ボリュームを暗号化しないので、ボリューム自体を暗号化して作り、パスフレーズは FileVault 内の `/opt/stack/secrets/` に置く。起動時に LaunchDaemon がそれを読んでアンロックする。
 
 ```
-sudo touch /opt/stack/.metadata_never_index     # 別ボリュームの場合に有効。フォルダの場合は GUI の「検索のプライバシー」で除外
+# 1. パスフレーズを生成して保存（root のみ読める）
+sudo sh -c 'openssl rand -base64 48 | tr -d "\n" > /opt/stack/secrets/stack-volume.key'
+sudo chmod 600 /opt/stack/secrets/stack-volume.key
+
+# 2. システムと同じ APFS コンテナを確認（通常 disk3。"Physical Store" と "Macintosh HD" が載っているもの）
+diskutil apfs list
+
+# 3. 暗号化ボリュームを作成。パスフレーズを聞かれたら 1 の内容を貼り付ける
+sudo cat /opt/stack/secrets/stack-volume.key; echo
+sudo diskutil apfs addVolume disk3 APFS Stack -passprompt
+
+# 4. 作成されたボリュームの UUID を控える（"Volume Stack" の行の直下 "APFS Volume Disk (Role)" の UUID）
+diskutil apfs list | grep -A3 'Name:.*Stack'
+sudo sh -c 'echo <UUID> > /opt/stack/secrets/stack-volume.uuid'
+
+# 5. 自動作成された /Volumes/Stack を一度アンマウントし、マウントスクリプトと LaunchDaemon を配置
+sudo diskutil unmount /Volumes/Stack
+sudo cp configs/scripts/mount-stack-volume.sh /opt/stack/scripts/
+sudo chmod 755 /opt/stack/scripts/mount-stack-volume.sh
+sudo cp configs/launchd/com.local.stack-volume.plist /Library/LaunchDaemons/
+sudo chown root:wheel /Library/LaunchDaemons/com.local.stack-volume.plist
+sudo launchctl bootstrap system /Library/LaunchDaemons/com.local.stack-volume.plist
+
+# 6. /opt/stack/data にマウントされたことを確認し、マーカーと Spotlight 除外、データ用ディレクトリを作る
+mount | grep /opt/stack/data
+sudo touch /opt/stack/data/.stack-volume-ready /opt/stack/data/.metadata_never_index
+sudo mkdir -p /opt/stack/data/{bitcoin,fulcrum/db,models}
+sudo chown -R _btcnode:staff /opt/stack/data/bitcoin /opt/stack/data/fulcrum
+sudo chown -R "$(whoami)":staff /opt/stack/data/models
+```
+
+- スクリプトは `diskutil apfs unlockVolume <UUID> -stdinpassphrase -mountpoint /opt/stack/data -nobrowse` を実行する。パスフレーズは標準入力で渡すのでプロセス一覧に出ない。
+- `nobrowse` で Finder とデスクトップに表示させない。
+- 再起動して、FileVault のパスワード入力後に自動でマウントされることを確認する（`mount | grep /opt/stack/data`）。
+- `stack-volume.key` と `stack-volume.uuid` はバックアップ対象（決定 Q12）。
+
+### 3.10 ログローテーション
+
+```
 sudo cp configs/newsyslog/stack.conf /etc/newsyslog.d/stack.conf
 ```
 
 `configs/newsyslog/stack.conf` は各サービスの `launchd.log` を週次で圧縮ローテーションする（bitcoind の `debug.log` は自前で縮小するので対象外）。
 
-### 3.10 GPU wired メモリ上限（フェーズ 3 で有効化してもよい）
+### 3.11 GPU wired メモリ上限（フェーズ 3 で有効化してもよい）
 
 ```
 sudo cp configs/launchd/com.local.gpu-wired-limit.plist /Library/LaunchDaemons/
@@ -212,6 +252,8 @@ sysctl iogpu.wired_limit_mb      # 458752 になっていれば反映済み
 - [ ] 時刻が自動同期されている
 - [ ] MacBook から LAN 経由で公開鍵認証のみで SSH できる（パスワード認証が拒否される）
 - [ ] `_btcnode` と `/opt/stack` が作成され、パーミッションが設計どおり
+- [ ] 暗号化ボリューム `Stack` が再起動後に自動で `/opt/stack/data` にマウントされる
+- [ ] `stack-volume.key` と `stack-volume.uuid` を暗号化 USB にコピーした
 - [ ] `brew` と `tor`、`uv` が入っている
 - [ ] 一度 `sudo fdesetup authrestart` で再起動し、パスワード入力なしに復帰してサービスが上がることを確認（LaunchDaemon 登録後）
 - [ ] 電源ケーブルを抜いて UPS がバッテリー駆動に切り替わり、macOS がそれを認識することを確認

@@ -7,7 +7,7 @@
     <key>ProgramArguments</key>
     <array>
         <string>/opt/stack/bin/bitcoind</string>
-        <string>-datadir=/opt/stack/bitcoin</string>
+        <string>-datadir=/opt/stack/data/bitcoin</string>
         <string>-conf=/opt/stack/bitcoin/bitcoin.conf</string>
     </array>
     <key>UserName</key>
@@ -16,8 +16,15 @@
     <string>/opt/stack/bitcoin</string>
     <key>RunAtLoad</key>
     <true/>
+    <!-- Stack ボリュームがマウントされている間だけ動かす -->
     <key>KeepAlive</key>
-    <true/>
+    <dict>
+        <key>PathState</key>
+        <dict>
+            <key>/opt/stack/data/.stack-volume-ready</key>
+            <true/>
+        </dict>
+    </dict>
     <key>ThrottleInterval</key>
     <integer>30</integer>
     <!-- SIGTERM 後に dbcache をフラッシュする時間を確保する -->

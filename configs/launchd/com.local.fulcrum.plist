@@ -15,8 +15,15 @@
     <string>/opt/stack/fulcrum</string>
     <key>RunAtLoad</key>
     <true/>
+    <!-- Stack ボリュームがマウントされている間だけ動かす -->
     <key>KeepAlive</key>
-    <true/>
+    <dict>
+        <key>PathState</key>
+        <dict>
+            <key>/opt/stack/data/.stack-volume-ready</key>
+            <true/>
+        </dict>
+    </dict>
     <key>ThrottleInterval</key>
     <integer>30</integer>
     <key>ExitTimeOut</key>

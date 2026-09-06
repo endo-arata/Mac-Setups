@@ -22,9 +22,11 @@ HiddenServiceVersion 3
 HiddenServicePort 50001 127.0.0.1:50001
 
 # ---- hidden service: SSH（クライアント認証あり）----
-# /opt/stack/tor/hs-ssh/authorized_clients/macbook.auth に
-#   descriptor:x25519:<MacBook 側で生成した公開鍵>
+# /opt/stack/tor/hs-ssh/authorized_clients/ に
+#   macbook.auth : descriptor:x25519:<MacBook 用の公開鍵>
+#   spare.auth   : descriptor:x25519:<予備の公開鍵（秘密鍵は暗号化 USB）>
 # を置く。鍵を持たないクライアントからは存在自体を検出できない。
+# 鍵の生成手順は docs/phase1-node.md 3.2。
 HiddenServiceDir /opt/stack/tor/hs-ssh
 HiddenServiceVersion 3
 HiddenServicePort 22 127.0.0.1:22

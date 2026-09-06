@@ -10,9 +10,10 @@
 
 | プロセス | 実行ファイル | 待ち受け | 依存 |
 |---|---|---|---|
+| stack-volume（root） | `/opt/stack/scripts/mount-stack-volume.sh` | なし（起動時に 1 回。Stack ボリュームを `/opt/stack/data` にマウント） | なし |
 | tor | `/opt/homebrew/bin/tor` | SOCKS `127.0.0.1:9050`、hidden service 3 つ | なし |
-| bitcoind | `/opt/stack/bin/bitcoind` | RPC `127.0.0.1:8332`、P2P `127.0.0.1:8334`（onion 受信用）、ZMQ `127.0.0.1:28332` | tor（無くても起動はする。接続できないだけ） |
-| Fulcrum | `/opt/stack/bin/Fulcrum` | Electrum TCP `127.0.0.1:50001` | bitcoind（RPC が応答するまで自分で待つ） |
+| bitcoind | `/opt/stack/bin/bitcoind` | RPC `127.0.0.1:8332`、P2P `127.0.0.1:8334`（onion 受信用）、ZMQ `127.0.0.1:28332` | Stack ボリューム（`PathState` で待つ）、tor（無くても起動はする。接続できないだけ） |
+| Fulcrum | `/opt/stack/bin/Fulcrum` | Electrum TCP `127.0.0.1:50001` | Stack ボリューム（`PathState` で待つ）、bitcoind（RPC が応答するまで自分で待つ） |
 
 - 全ポートを `127.0.0.1` にのみ束縛する。LAN からも直接は届かない。外に出る経路は Tor の hidden service だけ。
 - SSH（macOS の「リモートログイン」）だけは LAN からも使うので、LAN の固定 IP でも待ち受ける。
@@ -74,7 +75,7 @@ hidden service は 3 つとも torrc に静的に定義する（Bitcoin Core の
 
 - Tor のみで行うため帯域は Tor リレー次第。数日から 1 週間を見込む。
 - IBD 中は CPU（検証）とディスク I/O が張り付く。この期間は LLM を動かさない。
-- 進捗確認: `bitcoin-cli -datadir=/opt/stack/bitcoin getblockchaininfo | grep -E 'blocks|headers|verificationprogress'`
+- 進捗確認: `bitcoin-cli -datadir=/opt/stack/data/bitcoin getblockchaininfo | grep -E 'blocks|headers|verificationprogress'`
 - 完了後の作業: `dbcache` を `4096` に下げて再起動。
 
 ## 4. Fulcrum
@@ -89,8 +90,8 @@ hidden service は 3 つとも torrc に静的に定義する（Bitcoin Core の
 
 | 項目 | 値 | 理由 |
 |---|---|---|
-| `datadir=/opt/stack/fulcrum/db` | インデックスの置き場 | 約 200GB |
-| `bitcoind=127.0.0.1:8332`, `rpccookie=/opt/stack/bitcoin/.cookie` | RPC 接続 | クッキー認証 |
+| `datadir=/opt/stack/data/fulcrum/db` | インデックスの置き場（Stack ボリューム） | 約 200GB |
+| `bitcoind=127.0.0.1:8332`, `rpccookie=/opt/stack/data/bitcoin/.cookie` | RPC 接続 | クッキー認証。クッキーは bitcoind の datadir に生成される |
 | `tcp=127.0.0.1:50001` | Electrum TCP | Tor 経由のみなので SSL 不要 |
 | `ssl` 未設定 | SSL を開かない | 決定 Q13 |
 | `peering=false`, `announce=false` | 他サーバーと繋がない・公開しない | 自分専用 |
@@ -137,7 +138,8 @@ hidden service は 3 つとも torrc に静的に定義する（Bitcoin Core の
 `configs/launchd/` の 3 つの plist を `/Library/LaunchDaemons/` に置く。共通事項:
 
 - `UserName` = `_btcnode`
-- `RunAtLoad` = true、`KeepAlive` = true（落ちたら再起動）
+- `RunAtLoad` = true
+- `KeepAlive` = `PathState: /opt/stack/data/.stack-volume-ready`（bitcoind と Fulcrum）。Stack ボリュームがマウントされている間は落ちても再起動し、マウントされていなければ起動しない。tor は `KeepAlive` = true
 - `ThrottleInterval` = 30（再起動の間隔。連続クラッシュ時の暴走防止）
 - `ExitTimeOut` = bitcoind 600 秒、Fulcrum 300 秒、tor 30 秒（SIGTERM 後にこれだけ待ってから SIGKILL）
 - 標準出力・エラーは `/opt/stack/<name>/launchd.log` へ
@@ -157,21 +159,18 @@ sudo launchctl print system/com.local.bitcoind      # 状態確認
 
 ## 7. ユーザーとパーミッション
 
-```
-sudo sysadminctl -addUser _btcnode -fullName "Bitcoin Node Service" -shell /usr/bin/false -home /opt/stack -password -   # ログイン不可
-sudo mkdir -p /opt/stack/{bin,bitcoin,fulcrum/db,tor,monitor/secrets,models}
-sudo chown -R _btcnode:staff /opt/stack/{bitcoin,fulcrum,tor,monitor}
-sudo chmod 700 /opt/stack/tor /opt/stack/monitor/secrets
-sudo chown -R root:wheel /opt/stack/bin && sudo chmod 755 /opt/stack/bin/*
-sudo chown -R <admin>:staff /opt/stack/models
-```
+作成手順は `docs/phase0-macos.md` 3.8〜3.9 に集約した。要点:
+
+- `/opt/stack`（システムボリューム、FileVault 内）: `bin/`, `secrets/`, `scripts/` は root、`bitcoin/`, `fulcrum/`, `tor/`, `monitor/` は `_btcnode`。
+- `/opt/stack/data`（暗号化 APFS ボリューム `Stack`）: `bitcoin/`, `fulcrum/` は `_btcnode`、`models/` は管理者。
+- 進捗確認コマンドの datadir は `/opt/stack/data/bitcoin` になる。
 
 - `_btcnode` はログインシェル無し、パスワード無し、管理者グループに入れない。
 - 管理者ユーザーは `sudo -u _btcnode` 経由で `bitcoin-cli` と `FulcrumAdmin` を叩く（決定 N3）。クッキーファイルの権限は既定（`_btcnode` のみ読める）のまま変えない。
 - 管理者のシェルに alias を置いて短くする（`configs/macbook/` ではなく Mac Studio 側の `~/.zshrc`）:
 
 ```
-alias btc='sudo -u _btcnode /opt/stack/bin/bitcoin-cli -datadir=/opt/stack/bitcoin'
+alias btc='sudo -u _btcnode /opt/stack/bin/bitcoin-cli -datadir=/opt/stack/data/bitcoin'
 alias fadmin='sudo -u _btcnode /opt/stack/bin/FulcrumAdmin -p 8000'
 ```
 

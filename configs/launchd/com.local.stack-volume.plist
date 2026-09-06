@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!--
+      起動時に暗号化 APFS ボリューム "Stack" を /opt/stack/data にマウントする（決定 Q25）。
+      root で 1 回実行して終了する。失敗したら 60 秒後に再試行する（KeepAlive/SuccessfulExit=false）。
+      bitcoind / Fulcrum の plist は KeepAlive/PathState で /opt/stack/data/.stack-volume-ready を待つ。
+    -->
+    <key>Label</key>
+    <string>com.local.stack-volume</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/opt/stack/scripts/mount-stack-volume.sh</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+    <key>ThrottleInterval</key>
+    <integer>60</integer>
+    <key>StandardOutPath</key>
+    <string>/var/log/stack-volume.log</string>
+    <key>StandardErrorPath</key>
+    <string>/var/log/stack-volume.log</string>
+</dict>
+</plist>
