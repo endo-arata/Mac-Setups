@@ -1,6 +1,6 @@
 # Mac Studio (M3 Ultra / 512GB) 設計書
 
-- 版: v0.4（設計中。決定事項は「決定」、未決は「未決」と明記する）
+- 版: v0.5（設計中。決定事項は「決定」、未決は「未決」と明記する）
 - 最終更新: 2026-09-06
 
 ## 1. 目的と原則
@@ -30,7 +30,8 @@
 | メモリ | 512GB ユニファイド |
 | SSD | 8TB 内蔵 |
 | 運用形態 | 24 時間稼働のサーバー（決定） |
-| 操作端末 | MacBook Air（既存）、Ryzen 機（既存） |
+| 管理端末 | MacBook Air（既存）。SSH で Mac Studio を操作する。ウォレットは置かない |
+| ウォレット端末 | Ryzen 機で起動する Tails（既存）。Tails は x86_64 専用のため Apple Silicon では動かない。Electrum はここでのみ使う |
 | 電源 | UPS を新規導入する（決定）。USB 接続で macOS に認識させ、バッテリー残量低下時に自動で安全停止させる |
 | ネットワーク | 有線 LAN（内蔵 10GbE ポート）（決定）。ルーターの DHCP 予約で固定プライベート IP を与える。Wi‑Fi は無効化する |
 | 設置 | ヘッドレス。ただし FileVault のため、再起動時に使う小型モニタとキーボードを手の届く場所に置く |
@@ -38,18 +39,21 @@
 ## 3. 全体アーキテクチャ
 
 ```
-[MacBook Air]
-   Electrum ウォレット ---(自宅: LAN 直結 / 外出先: Tor .onion)---> [Mac Studio]
-   ssh クライアント   ---(自宅: LAN 直結 / 外出先: Tor .onion)--->     |
-                                                                      +-- Bitcoin Core (bitcoind)  ... P2P は Tor 経由
-                                                                      +-- Fulcrum (Electrum server) ... bitcoind の RPC を読む
-                                                                      +-- Tor (hidden service)     ... Fulcrum / SSH を .onion で公開
-                                                                      +-- [フェーズ2] mempool.space 自前ホスト（LAN 内、必要なら .onion も）
-                                                                      +-- [フェーズ3] LLM ランタイム（LAN 内から API 利用）
+[Tails on Ryzen 機]
+   Electrum ウォレット ---(常に Tor → Fulcrum の .onion)-------------> [Mac Studio]
+                                                                          |
+[MacBook Air]                                                             |
+   ssh クライアント   ---(自宅: LAN 直結 / 外出先: SSH の .onion)-------->  |
+                                                                          +-- Bitcoin Core (bitcoind)  ... P2P は Tor 経由
+                                                                          +-- Fulcrum (Electrum server) ... bitcoind の RPC を読む
+                                                                          +-- Tor (hidden service)     ... Fulcrum / SSH を .onion で公開
+                                                                          +-- [フェーズ2] mempool.space 自前ホスト（LAN 内、必要なら .onion も）
+                                                                          +-- [フェーズ3] LLM ランタイム（LAN 内から API 利用）
 ```
 
-- ウォレットは MacBook 側の Electrum（既存）をそのまま使い、接続先だけ自前 Fulcrum に固定する（決定）。
-- リモートアクセスは「自宅では LAN、外出先では Tor の hidden service」の二経路のみ（決定）。外出先から使うために MacBook 側にも Tor クライアントを入れる（Electrum は SOCKS プロキシ経由で .onion に接続できる）。
+- **ウォレットは Tails 上の Electrum（既存）をそのまま使う（決定）**。Tails は全通信を Tor に強制し、LAN 直結を許さないため、Electrum からの接続は自宅でも外出先でも **Fulcrum の .onion 経由に統一**される。設定変更は「接続先サーバーを自分の .onion に固定し、他サーバーへの自動接続を切る」の 1 点のみ。
+- Tails 側の準備: Tails の永続ストレージで「Electrum」機能を有効にし、ウォレットファイルとサーバー設定が再起動後も残るようにする（未確認の場合は要確認）。
+- MacBook Air は管理端末専用。ウォレットも秘密鍵も置かない。自宅では LAN 直結、外出先では SSH の hidden service 経由で Mac Studio に入る（決定）。
 - グローバル IP へのポート開放は一切しない（決定）。
 - Ethereum ノードは立てない。MetaMask は従来通り外部 RPC を使う（決定）。
 - Lightning / BTCPay は当面見送り。必要になったら別フェーズで検討（未決 → 保留）。
@@ -105,7 +109,9 @@
 - 導入: 公式リリースの macOS (arm64) バイナリを署名検証のうえ使用（決定）。公式 macOS ビルドが無いバージョンの場合のみソースからビルドする。
 - 主要設定（案）:
   - bitcoind の RPC を参照
-  - TCP 50001 / SSL 50002 をローカルおよび Tor hidden service に公開
+  - TCP 50001 を `127.0.0.1` にのみ待ち受け、Tor hidden service 経由で公開する。Tor 自体が経路を暗号化し、.onion アドレスがサーバーの真正性を保証するため、Tor 経由では SSL は不要
+  - SSL 50002 は LAN 内から使うクライアントが現れた場合のみ有効化する（現状ウォレットは Tails のみなので当面不要）
+  - `peering=false`, `announce=false`（他の Electrum サーバーと繋がず、公開サーバー一覧にも載せない。自分専用のサーバーとして存在を隠す）
   - 初期同期時はメモリ割り当てを多めにし、完了後に下げる
 - 自動起動: launchd。bitcoind が起動していることを前提に順序を制御する。
 
@@ -118,10 +124,11 @@
 
 ### 5.4 リモートアクセス（決定: LAN + Tor）
 
-- **自宅（LAN）**: Mac Studio に固定のプライベート IP（ルーターの DHCP 予約）と LAN 内ホスト名を与え、Electrum と SSH は直接接続する。
-- **外出先**: MacBook 上の Tor クライアント経由で、Fulcrum の .onion と SSH の .onion に接続する。速度は落ちるが、第三者のサーバーを一切介さない。
+- **ウォレット（Tails）**: 常に Tor 経由で Fulcrum の .onion に接続する。場所を問わず同じ設定で動く。
+- **管理（MacBook、自宅）**: Mac Studio に固定のプライベート IP（ルーターの DHCP 予約）と LAN 内ホスト名を与え、SSH は直接接続する。
+- **管理（MacBook、外出先）**: MacBook 上の Tor クライアント経由で SSH の .onion に接続する。速度は落ちるが、第三者のサーバーを一切介さない。
 - **使わないもの**: Tailscale などのメッシュ VPN、ルーターのポート開放、DDNS。
-- MacBook 側の準備: `tor` を Homebrew で入れて常駐させ、Electrum のプロキシ設定を `socks5://127.0.0.1:9050` にする。SSH は `~/.ssh/config` で .onion ホストに対して `ProxyCommand` を設定する。
+- MacBook 側の準備: `tor` を Homebrew で入れ、`~/.ssh/config` で .onion ホストに対して `ProxyCommand`（`nc -x 127.0.0.1:9050 %h %p`）を設定する。
 
 ### 5.5 mempool.space 自前ホスト（フェーズ 2、暫定採用。ネイティブ導入の手間を要確認）
 
@@ -162,7 +169,8 @@
   models/                   ... LLM モデル（所有者は管理者ユーザー。LLM はノードと分離）
 /Library/LaunchDaemons/     ... com.local.bitcoind.plist など
 ```
-- ウォレットの秘密鍵は Mac Studio に置かない。署名は MacBook（既存 Electrum）で行う。
+- ウォレットの秘密鍵は Mac Studio にも MacBook にも置かない。署名は Tails 上の Electrum でのみ行う。
+- Mac Studio が侵害されても失われるのは「どのアドレスを監視しているか」という情報までで、資金は動かせない。この分離を崩さない。
 - 将来的にハードウェアウォレット導入を検討する余地を残す（保留）。
 
 ## 7. 運用方針（案）
@@ -215,7 +223,8 @@
 | Q10 | ネットワーク | 固定 IP の割り当て方、LAN 内ホスト名、Wi‑Fi か有線か | **決定: 有線 10GbE、DHCP 予約で固定 IP** |
 | Q11 | ログイン・ユーザー構成 | 管理者 1 ユーザー / サービス専用ユーザーを分ける | **決定: 管理者＋サービス専用ユーザー `_btcnode`** |
 | Q12 | 設定・鍵のバックアップ先 | 外付け SSD / MacBook / 紙（Tor 鍵は小さい） | **決定: 暗号化した外付け SSD / USB メモリ** |
-| Q13 | Fulcrum の SSL 証明書 | 自己署名（Electrum 側で固定して信頼） / 使わず Tor のみ | 未決 |
+| Q13 | Fulcrum の SSL 証明書 | 自己署名（Electrum 側で固定して信頼） / 使わず Tor のみ | **決定: Tor のみ（TCP 50001 を hidden service で公開）。ウォレットが Tails のため LAN 直結が無い** |
+| Q17 | Tails の永続ストレージで Electrum 機能が有効か | 有効 / 未設定 | 未決（要確認） |
 | Q14 | bitcoind の P2P 経路 | Tor のみ（onlynet=onion） / Tor＋クリアネット | 未決 |
 | Q15 | MacBook 側の Tor クライアント | Homebrew の tor 常駐 / Tor Browser 起動時のみ | 未決 |
 | Q16 | GPU メモリ上限の設定タイミング | 起動時に固定 / LLM 使用時だけ手動 | 未決 |
